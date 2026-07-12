@@ -105,10 +105,19 @@ final class FFmpegTask {
         let pipe = Pipe()
         process.standardError = pipe
 
+        // waitUntilExit() は子プロセスが極端に短命なとき終了通知を取りこぼして
+        // 永遠に戻らないことがある（キューが止まる実バグの原因）。
+        // 起動前に terminationHandler を仕込み、そちらで終了コードを受け取る
+        let exitCodes = AsyncStream<Int32> { continuation in
+            process.terminationHandler = { proc in
+                continuation.yield(proc.terminationStatus)
+                continuation.finish()
+            }
+        }
+
         try process.run()
 
-        let proc = process
-        return await Task.detached(priority: .userInitiated) {
+        let output = await Task.detached(priority: .userInitiated) {
             let handle = pipe.fileHandleForReading
             var output = ""
             var buffer = ""
@@ -128,8 +137,11 @@ final class FFmpegTask {
             if !buffer.isEmpty {
                 onLine(buffer)
             }
-            proc.waitUntilExit()
-            return (proc.terminationStatus, output)
+            return output
         }.value
+
+        var exitCode: Int32 = -1
+        for await code in exitCodes { exitCode = code }
+        return (exitCode, output)
     }
 }
